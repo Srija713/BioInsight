@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+plotly
+joblib
+scikit-learn
+xgboost
+shap
+matplotlib
+sqlalchemy
+psycopg2-binary
+plotly-express
