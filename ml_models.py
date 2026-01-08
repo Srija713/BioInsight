@@ -5,7 +5,7 @@ Implements multiple models with comprehensive evaluation
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
@@ -130,6 +130,72 @@ class BioactivityPredictor:
         self.results['random_forest'] = results
         
         return model, results
+
+    def tune_random_forest(self, param_distributions=None, n_iter=30, cv=5, scoring='f1', n_jobs=-1, oversample=False):
+        """Hyperparameter tuning for Random Forest using RandomizedSearchCV
+
+        Args:
+            param_distributions: dict of parameters to sample from
+            n_iter: number of parameter settings that are sampled
+            cv: number of CV folds
+            scoring: scoring metric for CV
+            n_jobs: parallel jobs
+            oversample: whether to oversample minority class in training data before tuning
+        """
+        print("\n" + "="*60)
+        print("Tuning Random Forest (RandomizedSearchCV)")
+        print("="*60)
+
+        if oversample:
+            self._oversample_training()
+
+        if param_distributions is None:
+            param_distributions = {
+                'n_estimators': [100, 300, 500],
+                'max_depth': [None, 6, 10, 20],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4],
+                'max_features': ['sqrt', 'log2', None]
+            }
+
+        base = RandomForestClassifier(random_state=self.random_state, class_weight='balanced', n_jobs=-1)
+
+        cv_strategy = StratifiedKFold(n_splits=cv, shuffle=True, random_state=self.random_state)
+
+        search = RandomizedSearchCV(
+            estimator=base,
+            param_distributions=param_distributions,
+            n_iter=n_iter,
+            scoring=scoring,
+            cv=cv_strategy,
+            random_state=self.random_state,
+            n_jobs=n_jobs,
+            verbose=1
+        )
+
+        search.fit(self.X_train, self.y_train)
+
+        best = search.best_estimator_
+        print(f"Best RF params: {search.best_params_}")
+
+        # Evaluate on test set
+        y_pred = best.predict(self.X_test)
+        y_pred_proba = best.predict_proba(self.X_test)[:, 1]
+        results = self._evaluate_model(y_pred, y_pred_proba, "Random Forest (Tuned)")
+
+        # Feature importance
+        feature_importance = pd.DataFrame({
+            'feature': self.feature_names,
+            'importance': best.feature_importances_
+        }).sort_values('importance', ascending=False)
+
+        results['feature_importance'] = feature_importance
+
+        self.models['random_forest_tuned'] = best
+        self.results['random_forest_tuned'] = results
+        self.results['random_forest_tuned']['cv_results'] = search.cv_results_
+
+        return best, results
     
     def train_xgboost(self):
         """Train XGBoost model"""
@@ -177,6 +243,120 @@ class BioactivityPredictor:
         self.results['xgboost'] = results
         
         return model, results
+
+    def tune_xgboost(self, param_distributions=None, n_iter=30, cv=5, scoring='f1', n_jobs=-1, oversample=False):
+        """Hyperparameter tuning for XGBoost using RandomizedSearchCV"""
+        print("\n" + "="*60)
+        print("Tuning XGBoost (RandomizedSearchCV)")
+        print("="*60)
+
+        if oversample:
+            self._oversample_training()
+
+        # default param space
+        if param_distributions is None:
+            param_distributions = {
+                'n_estimators': [100, 200, 400],
+                'max_depth': [3, 6, 10],
+                'learning_rate': [0.01, 0.05, 0.1, 0.2],
+                'subsample': [0.6, 0.8, 1.0],
+                'colsample_bytree': [0.6, 0.8, 1.0],
+                'gamma': [0, 1, 5]
+            }
+
+        base = xgb.XGBClassifier(
+            random_state=self.random_state,
+            use_label_encoder=False,
+            eval_metric='logloss'
+        )
+
+        cv_strategy = StratifiedKFold(n_splits=cv, shuffle=True, random_state=self.random_state)
+
+        search = RandomizedSearchCV(
+            estimator=base,
+            param_distributions=param_distributions,
+            n_iter=n_iter,
+            scoring=scoring,
+            cv=cv_strategy,
+            random_state=self.random_state,
+            n_jobs=n_jobs,
+            verbose=1
+        )
+
+        search.fit(self.X_train, self.y_train)
+
+        best = search.best_estimator_
+        print(f"Best XGB params: {search.best_params_}")
+
+        # Evaluate on test set
+        y_pred = best.predict(self.X_test)
+        y_pred_proba = best.predict_proba(self.X_test)[:, 1]
+        results = self._evaluate_model(y_pred, y_pred_proba, "XGBoost (Tuned)")
+
+        feature_importance = pd.DataFrame({
+            'feature': self.feature_names,
+            'importance': best.feature_importances_
+        }).sort_values('importance', ascending=False)
+
+        results['feature_importance'] = feature_importance
+
+        self.models['xgboost_tuned'] = best
+        self.results['xgboost_tuned'] = results
+        self.results['xgboost_tuned']['cv_results'] = search.cv_results_
+
+        return best, results
+
+    def cross_validate_best(self, model_name, cv=5, scoring='f1'):
+        """Run cross-validation on the specified trained model using training data"""
+        if model_name not in self.models:
+            raise ValueError(f"Model {model_name} not found for CV")
+
+        model = self.models[model_name]
+        cv_strategy = StratifiedKFold(n_splits=cv, shuffle=True, random_state=self.random_state)
+        scores = cross_val_score(model, self.X_train, self.y_train, cv=cv_strategy, scoring=scoring, n_jobs=-1)
+        print(f"Cross-validation {scoring} scores ({model_name}): {scores}")
+        print(f"Mean {scoring}: {scores.mean():.4f} (+/- {scores.std():.4f})")
+        return scores
+
+    def _oversample_training(self, random_state=None):
+        """Simple random oversampling of minority class in training set."""
+        print("Performing simple random oversampling on training data...")
+        try:
+            X_train_df = pd.DataFrame(self.X_train, columns=self.feature_names)
+        except Exception:
+            X_train_df = pd.DataFrame(self.X_train)
+
+        y_train_ser = pd.Series(self.y_train, name='is_active')
+        train_df = pd.concat([X_train_df, y_train_ser.reset_index(drop=True)], axis=1)
+
+        counts = train_df['is_active'].value_counts()
+        if counts.min() == counts.max():
+            print('Classes already balanced. Skipping oversampling.')
+            return
+
+        majority_class = counts.idxmax()
+        majority_count = counts.max()
+
+        dfs = [train_df[train_df['is_active'] == cls] for cls in counts.index]
+        resampled = []
+        for cls_df in dfs:
+            if len(cls_df) < majority_count:
+                resampled_cls = cls_df.sample(n=majority_count, replace=True, random_state=random_state or self.random_state)
+            else:
+                resampled_cls = cls_df
+            resampled.append(resampled_cls)
+
+        balanced_df = pd.concat(resampled).sample(frac=1, random_state=random_state or self.random_state).reset_index(drop=True)
+
+        y_bal = balanced_df['is_active'].values
+        X_bal = balanced_df.drop(columns=['is_active']).values
+
+        # Update training sets and scaled versions
+        self.X_train = X_bal
+        self.y_train = y_bal
+        self.X_train_scaled = self.scaler.fit_transform(self.X_train)
+
+        print('Oversampling complete. New training size:', self.X_train.shape)
     
     def _evaluate_model(self, y_pred, y_pred_proba, model_name):
         """Comprehensive model evaluation"""
